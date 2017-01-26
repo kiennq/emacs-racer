@@ -8,6 +8,7 @@
 (depends-on "s")
 (depends-on "f")
 (depends-on "rust-mode")
+(depends-on "async")
 
 (development
  (depends-on "ert-runner")
