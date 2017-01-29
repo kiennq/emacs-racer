@@ -5,7 +5,7 @@
 ;; Author: Phil Dawes
 ;; URL: https://github.com/racer-rust/emacs-racer
 ;; Version: 1.3
-;; Package-Requires: ((emacs "24.3") (rust-mode "0.2.0") (dash "2.13.0") (s "1.10.0") (f "0.18.2") (async "1.9"))
+;; Package-Requires: ((emacs "24.3") (rust-mode "0.2.0") (dash "2.13.0") (s "1.10.0") (f "0.18.2") (deferred "0.5.0"))
 ;; Keywords: abbrev, convenience, matching, rust, tools
 
 ;; This file is not part of GNU Emacs.
@@ -68,7 +68,7 @@
 (require 'thingatpt)
 (require 'button)
 (require 'help-mode)
-(require 'async)
+(require 'deferred)
 
 (defgroup racer nil
   "Code completion, goto-definition and docs browsing for Rust via racer."
@@ -199,7 +199,10 @@ error."
                                         (format "CARGO_HOME=%s" (expand-file-name cargo-home)))
                                        process-environment)))
       (-let [(exit-code stdout _stderr)
-             (racer--shell-command racer-cmd (cons command args))]
+             (if (or (string= command "complete") (string= command "complete-with-snippet"))
+                 (racer--shell-command-async racer-cmd (cons command args))
+               (message "enter here with: %s" command)
+               (racer--shell-command racer-cmd (cons command args)))]
         (unless (zerop exit-code)
           (user-error "%s exited with %s. `M-x racer-debug' for more info"
                       racer-cmd exit-code))
@@ -229,60 +232,83 @@ Evaluate BODY, then delete the temporary file."
   "List (exit-code stdout stderr).")
 
 (defun racer--shell-command (program args)
+  "Execute PROGRAM with ARGS.
+Return a list (exit-code stdout stderr)."
+  (racer--with-temporary-file tmp-file-for-stderr
+    (let (exit-code stdout stderr)
+      ;; Create a temporary buffer for `call-process` to write stdout
+      ;; into.
+      (with-temp-buffer
+        (setq exit-code
+              (apply #'call-process program nil
+                     (list (current-buffer) tmp-file-for-stderr)
+                     nil args))
+        (setq stdout (buffer-string)))
+      (setq stderr (racer--slurp tmp-file-for-stderr))
+      (setq racer--prev-state
+            (list
+             :program program
+             :args args
+             :exit-code exit-code
+             :stdout stdout
+             :stderr stderr
+             :default-directory default-directory
+             :process-environment process-environment))
+      (list exit-code stdout stderr))))
+
+(defun racer--shell-command-async (program args)
   "Execute PROGRAM with ARGS in other process.
 Return a list (exit-code stdout stderr)."
   (-let [current-cmd (pop racer--command-queued)]
-    (when current-cmd
+    (when (and current-cmd (not racer--shell-command-res))
+      (message (format-time-string "1: %S:%3N" (current-time)))
       ;; (or racer--shell-command-res
-      (let ((id (car current-cmd)))
+      (let ((id (car current-cmd))
+            (tmp-file (make-temp-file "racer")))
         (push current-cmd racer--command-dispatched)
-        (async-start
-         `(lambda ()
-            (let ((tmp-file-for-stderr (make-temp-file "racer")))
-              (unwind-protect
-                  (let (exit-code stdout stderr)
-                    ;; Create a temporary buffer for `call-process` to write stdout
-                    ;; into.
-                    (with-temp-buffer
-                      (setq exit-code
-                            (apply #'call-process ,program nil
-                                   (list (current-buffer) tmp-file-for-stderr)
-                                   nil ',args))
-                      (setq stdout (buffer-string)))
-                    ;; delete tmp file
-                    (delete-file (elt ',args 4))
-                    (setq stderr (with-temp-buffer
-                                   (insert-file-contents-literally tmp-file-for-stderr)
-                                   (buffer-string)))
-                    (list ,id exit-code stdout stderr))
-                (delete-file tmp-file-for-stderr)))
-            )
-         (lambda (res)
-           ;; (message (format "res: %s" res))
-           (-let* (((id exit-code stdout stderr) res)
-                   (cmd (assq id racer--command-dispatched)))
-             (setq racer--command-dispatched
-                   (delete cmd racer--command-dispatched))
-             (setq racer--shell-command-res (cdr res))
-             (setq racer--prev-state
-                   (list
-                    :program program
-                    :args args
-                    :exit-code exit-code
-                    :stdout stdout
-                    :stderr stderr
-                    :default-directory default-directory
-                    :process-environment process-environment))
-             ;; (funcall (cdr cmd))
-             ;; (setq racer--shell-command-res nil)
-             )))
-        (or racer--shell-command-res '(0 nil nil))))
+        (write-region nil nil tmp-file nil 'silent)
+        (setcar (nthcdr 4 args) tmp-file)
+        (deferred:$
+          (apply #'deferred:process program args)
+          (eval `(deferred:nextc ,it
+                   (lambda (stdout)
+                     (list ,id ',args 0 stdout ""))))
+          (eval `(deferred:error ,it
+                   (lambda (err)
+                     (list ,id ',args 1 "" (cadr err)))))
+          (deferred:nextc it
+            (lambda (res)
+              (-let* (((id args exit-code stdout stderr) res)
+                      (cmd (assq id racer--command-dispatched)))
+                ;; delete tmp file
+                (delete-file (elt args 4))
+                (setq racer--command-dispatched
+                      (delete cmd racer--command-dispatched))
+                (setq racer--shell-command-res (nthcdr 2 res))
+                (setq racer--prev-state
+                      (list
+                       :program program
+                       :args args
+                       :exit-code exit-code
+                       :stdout stdout
+                       :stderr stderr
+                       :default-directory default-directory
+                       :process-environment process-environment))
+                ;; (funcall (cdr cmd))
+                ;; (setq racer--shell-command-res nil)
+                (nthcdr 2 res)
+                )))))
+      (message (format-time-string "2: %S:%3N" (current-time)))
+      )
+    (let ((ret racer--shell-command-res))
+      (setq racer--shell-command-res nil)
+      (or ret '(0 "" "")))
   ))
 
 (defun racer--call-at-point (command)
   "Call racer command COMMAND at point of current buffer.
 Return a list of all the lines returned by the command."
-  (let ((tmp-file (make-temp-file "racer")))
+  (racer--with-temporary-file tmp-file
     (write-region nil nil tmp-file nil 'silent)
     (s-lines
      (s-trim-right
@@ -624,7 +650,6 @@ Commands:
       (let* ((bounds (bounds-of-thing-at-point 'symbol))
              (beg (or (car bounds) (point)))
              (end (or (cdr bounds) (point))))
-        (push `(,(incf racer--command-id) . completion-at-point) racer--command-queued)
         (list beg end
               (completion-table-dynamic #'racer-complete)
               :annotation-function #'racer-complete--annotation
@@ -641,6 +666,7 @@ Commands:
 
 (defun racer-complete (&optional _ignore)
   "Completion candidates at point."
+  (push `(,(incf racer--command-id) . completion-at-point) racer--command-queued)
   (->> (racer--call-at-point "complete")
        (--filter (s-starts-with? "MATCH" it))
        (--map (-let [(name line col file matchtype ctx)
