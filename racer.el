@@ -256,20 +256,31 @@ Return a list (exit-code stdout stderr)."
              :process-environment process-environment))
       (list exit-code stdout stderr))))
 
+(defvar racer--shell-last-command nil)
+(defvar racer--tmp-env nil)
+
 (defun racer--shell-command-async (program args)
   "Execute PROGRAM with ARGS in other process.
 Return a list (exit-code stdout stderr)."
   (-let [current-cmd (pop racer--command-queued)]
-    (when (and current-cmd (not racer--shell-command-res))
-      (message (format-time-string "1: %S:%3N" (current-time)))
+    (when (and current-cmd (not (equal racer--shell-last-command `(,program ,@(butlast args)))))
+      (setq racer--shell-last-command `(,program ,@(butlast args)))
       ;; (or racer--shell-command-res
       (let ((id (car current-cmd))
             (tmp-file (make-temp-file "racer")))
         (push current-cmd racer--command-dispatched)
         (write-region nil nil tmp-file nil 'silent)
         (setcar (nthcdr 4 args) tmp-file)
+        (setq racer--tmp-env process-environment)
         (deferred:$
-          (apply #'deferred:process program args)
+          (deferred:wait-idle 300)
+          (deferred:nextc it
+            (lambda (_)
+              (message "%s: %s" (format-time-string "  1: %S:%3N" (current-time)) _)
+              (-let [process-environment racer--tmp-env]
+                (if (< (+ id 3) racer--command-id) ""
+                  (message "        id = %s %s" id racer--command-id)
+                  (apply #'deferred:process program args)))))
           (eval `(deferred:nextc ,it
                    (lambda (stdout)
                      (list ,id ',args 0 stdout ""))))
@@ -296,12 +307,15 @@ Return a list (exit-code stdout stderr)."
                        :process-environment process-environment))
                 ;; (funcall (cdr cmd))
                 ;; (setq racer--shell-command-res nil)
+                ;; (message (format-time-string "      3: %S:%3N" (current-time)))
+                (message (format-time-string "  2: %S:%3N" (current-time)))
                 (nthcdr 2 res)
-                )))))
-      (message (format-time-string "2: %S:%3N" (current-time)))
+                )))
+          )
+        )
       )
     (let ((ret racer--shell-command-res))
-      (setq racer--shell-command-res nil)
+      ;; (setq racer--shell-command-res nil)
       (or ret '(0 "" "")))
   ))
 
