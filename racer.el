@@ -225,10 +225,6 @@ Evaluate BODY, then delete the temporary file."
 
 (defvar racer--thread nil "Child thread for capf.")
 
-(defvar racer--command-id 0)
-(defvar racer--command-queued nil)
-(defvar racer--command-dispatched nil)
-
 (defvar racer--shell-command-res nil
   "List (exit-code stdout stderr).")
 
@@ -257,69 +253,6 @@ Return a list (exit-code stdout stderr)."
              :process-environment process-environment))
       (list exit-code stdout stderr))))
 
-(defvar racer--shell-last-command nil)
-(defvar racer--tmp-env nil)
-
-(defun racer--shell-command-async (program args)
-  "Execute PROGRAM with ARGS in other process.
-Return a list (exit-code stdout stderr)."
-  (-let [current-cmd (pop racer--command-queued)]
-    (when (and current-cmd (not (equal racer--shell-last-command `(,program ,@(butlast args)))))
-      (setq racer--shell-last-command `(,program ,@(butlast args)))
-      ;; (or racer--shell-command-res
-      (let ((id (car current-cmd))
-            (tmp-file (make-temp-file "racer")))
-        (push current-cmd racer--command-dispatched)
-        (write-region nil nil tmp-file nil 'silent)
-        (setcar (nthcdr 4 args) tmp-file)
-        (setq racer--tmp-env process-environment)
-        (deferred:$
-          (deferred:wait-idle 100)
-          (deferred:nextc it
-            (lambda (_)
-              (message "%s: %s" (format-time-string "  1: %S:%3N" (current-time)) _)
-              (-let [process-environment racer--tmp-env]
-                (if (< (+ id 3) racer--command-id) ""
-                  (message "        id = %s %s" id racer--command-id)
-                  (apply #'deferred:process program args)))))
-          (eval `(deferred:nextc ,it
-                   (lambda (stdout)
-                     (list ,id ',args 0 stdout ""))))
-          (eval `(deferred:error ,it
-                   (lambda (err)
-                     (list ,id ',args 1 "" (cadr err)))))
-          (deferred:nextc it
-            (lambda (res)
-              (-let* (((id args exit-code stdout stderr) res)
-                      (cmd (assq id racer--command-dispatched)))
-                ;; delete tmp file
-                (delete-file (elt args 4))
-                (setq racer--command-dispatched
-                      (delete cmd racer--command-dispatched))
-                (setq racer--shell-command-res (nthcdr 2 res))
-                (setq racer--prev-state
-                      (list
-                       :program program
-                       :args args
-                       :exit-code exit-code
-                       :stdout stdout
-                       :stderr stderr
-                       :default-directory default-directory
-                       :process-environment process-environment))
-                ;; (funcall (cdr cmd))
-                ;; (setq racer--shell-command-res nil)
-                ;; (message (format-time-string "      3: %S:%3N" (current-time)))
-                (message (format-time-string "  2: %S:%3N" (current-time)))
-                (nthcdr 2 res)
-                )))
-          )
-        )
-      )
-    (let ((ret racer--shell-command-res))
-      ;; (setq racer--shell-command-res nil)
-      (or ret '(0 "" "")))
-  ))
-
 (defun racer--call-at-point (command)
   "Call racer command COMMAND at point of current buffer.
 Return a list of all the lines returned by the command."
@@ -334,33 +267,42 @@ Return a list of all the lines returned by the command."
                    tmp-file)))))
 
 (defvar racer--capf-res nil)
+(defvar racer--capf-last-cmd nil)
+
 (defun racer--call-at-point-async (command)
   "Asynchronously call racer command COMMAND at point of current buffer.
 Return a list of all the lines returned by the command."
-  (let ((tmp-file (make-temp-file "racer")))
-    (write-region nil nil tmp-file nil 'silent)
-    (timp-send-exec racer--thread
-                    `(lambda (command row col cur-file)
-                       (message "enter")
-                       ;; (let ((res (racer--call command row col cur-file ,tmp-file)))
-                       ;;   (delete-file ,tmp-file)
-                       ;;   (list res racer--prev-state)
-                       ;;   )
-                       (delete-file ,tmp-file)
-                       (list nil nil)
-                       )
-                    command
-                    (number-to-string (line-number-at-pos))
-                    (number-to-string (racer--current-column))
-                    (buffer-file-name (buffer-base-buffer))
-                    :reply-func
-                    (lambda (data)
-                      (setq racer--prev-state (cadr data))
-                      (setq racer--capf-res (car data)))
-                    :error-handler
-                    (lambda (err) (message "ERR: %s" err))
-                    :unique)
-    (s-lines (s-trim-right (or racer--capf-res "")))))
+  (when (not (equal racer--capf-last-cmd `(,command ,(point) ,(buffer-file-name (buffer-base-buffer)))))
+    (setq racer--capf-last-cmd `(,command ,(point) ,(buffer-file-name (buffer-base-buffer))))
+    (let ((tmp-file (make-temp-file "racer")))
+      (write-region nil nil tmp-file nil 'silent)
+      (timp-send-exec racer--thread
+                      #'(lambda (command row col cur-file tmp-file)
+                          (let* ((res (racer--call command row col cur-file tmp-file))
+                                 (trim-res (with-temp-buffer
+                                             (insert res)
+                                             (goto-line 20)
+                                             (buffer-substring (point-min) (line-end-position)))))
+                            (delete-file tmp-file)
+                            (list trim-res racer--prev-state))
+                          ;; (delete-file ,tmp-file)
+                          ;; (list nil nil)
+                          )
+                      command
+                      (number-to-string (line-number-at-pos))
+                      (number-to-string (racer--current-column))
+                      (buffer-file-name (buffer-base-buffer))
+                      tmp-file
+                      :reply-func
+                      (lambda (data)
+                        (message "res: %s" (length (s-lines (s-trim-right (car data)))))
+                        (setq racer--prev-state (cadr data))
+                        (setq racer--capf-res (car data)))
+                      :error-handler
+                      (lambda (err) (message "ERR: %s" err))
+                      :unique)))
+  (s-lines (s-trim-right (or racer--capf-res "")))
+  )
 
 (defun racer--read-rust-string (string)
   "Convert STRING, a rust string literal, to an elisp string."
@@ -710,7 +652,6 @@ Commands:
 
 (defun racer-complete (&optional _ignore)
   "Completion candidates at point."
-  (push `(,(incf racer--command-id) . completion-at-point) racer--command-queued)
   (->> (racer--call-at-point-async "complete")
        (--filter (s-starts-with? "MATCH" it))
        (--map (-let [(name line col file matchtype ctx)
@@ -847,8 +788,10 @@ If PATH is not in DIRECTORY, just abbreviate it."
         ;; Syntax highlight function signatures.
         (racer--syntax-highlight prototype)))))
 
-(defun racer--thread-init ()
+;;;#autoload
+(defun racer-thread-init ()
   "Init child thread."
+  (interactive)
   (if racer--thread (timp-force-quit racer--thread))
   (setq racer--thread (timp-get :persist t))
   (timp-send-variable racer--thread racer-rust-src-path racer-cmd)
@@ -868,7 +811,7 @@ If PATH is not in DIRECTORY, just abbreviate it."
   (setq-local eldoc-documentation-function #'racer-eldoc)
   (set (make-local-variable 'completion-at-point-functions) nil)
   (add-hook 'completion-at-point-functions #'racer-complete-at-point)
-  (racer--thread-init))
+  (racer-thread-init))
 
 (define-obsolete-function-alias 'racer-turn-on-eldoc 'eldoc-mode)
 (define-obsolete-function-alias 'racer-activate 'racer-mode)
