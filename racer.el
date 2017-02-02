@@ -281,7 +281,8 @@ Return a list of all the lines returned by the command."
                           (let* ((res (racer--call command row col cur-file tmp-file))
                                  (trim-res (with-temp-buffer
                                              (insert res)
-                                             (goto-line 20)
+                                             (goto-char (point-min))
+                                             (forward-line 20)
                                              (buffer-substring (point-min) (line-end-position)))))
                             (delete-file tmp-file)
                             (list trim-res racer--prev-state))
