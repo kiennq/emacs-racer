@@ -5,7 +5,7 @@
 ;; Author: Phil Dawes
 ;; URL: https://github.com/racer-rust/emacs-racer
 ;; Version: 1.3
-;; Package-Requires: ((emacs "24.3") (rust-mode "0.2.0") (dash "2.13.0") (s "1.10.0") (f "0.18.2") (deferred "0.5.0"))
+;; Package-Requires: ((emacs "24.3") (rust-mode "0.2.0") (dash "2.13.0") (s "1.10.0") (f "0.18.2") (timp))
 ;; Keywords: abbrev, convenience, matching, rust, tools
 
 ;; This file is not part of GNU Emacs.
@@ -68,7 +68,7 @@
 (require 'thingatpt)
 (require 'button)
 (require 'help-mode)
-(require 'deferred)
+(require 'timp)
 
 (defgroup racer nil
   "Code completion, goto-definition and docs browsing for Rust via racer."
@@ -199,10 +199,10 @@ error."
                                         (format "CARGO_HOME=%s" (expand-file-name cargo-home)))
                                        process-environment)))
       (-let [(exit-code stdout _stderr)
-             (if (or (string= command "complete") (string= command "complete-with-snippet"))
-                 (racer--shell-command-async racer-cmd (cons command args))
-               (message "enter here with: %s" command)
-               (racer--shell-command racer-cmd (cons command args)))]
+             ;; (if (or (string= command "complete") (string= command "complete-with-snippet"))
+             ;;     (racer--shell-command-async racer-cmd (cons command args))
+             ;;   (racer--shell-command racer-cmd (cons command args)))
+             (racer--shell-command racer-cmd (cons command args))]
         (unless (zerop exit-code)
           (user-error "%s exited with %s. `M-x racer-debug' for more info"
                       racer-cmd exit-code))
@@ -223,6 +223,7 @@ Evaluate BODY, then delete the temporary file."
     (insert-file-contents-literally file)
     (buffer-string)))
 
+(defvar racer--thread nil "Child thread for capf.")
 
 (defvar racer--command-id 0)
 (defvar racer--command-queued nil)
@@ -273,7 +274,7 @@ Return a list (exit-code stdout stderr)."
         (setcar (nthcdr 4 args) tmp-file)
         (setq racer--tmp-env process-environment)
         (deferred:$
-          (deferred:wait-idle 300)
+          (deferred:wait-idle 100)
           (deferred:nextc it
             (lambda (_)
               (message "%s: %s" (format-time-string "  1: %S:%3N" (current-time)) _)
@@ -331,6 +332,35 @@ Return a list of all the lines returned by the command."
                    (number-to-string (racer--current-column))
                    (buffer-file-name (buffer-base-buffer))
                    tmp-file)))))
+
+(defvar racer--capf-res nil)
+(defun racer--call-at-point-async (command)
+  "Asynchronously call racer command COMMAND at point of current buffer.
+Return a list of all the lines returned by the command."
+  (let ((tmp-file (make-temp-file "racer")))
+    (write-region nil nil tmp-file nil 'silent)
+    (timp-send-exec racer--thread
+                    `(lambda (command row col cur-file)
+                       (message "enter")
+                       ;; (let ((res (racer--call command row col cur-file ,tmp-file)))
+                       ;;   (delete-file ,tmp-file)
+                       ;;   (list res racer--prev-state)
+                       ;;   )
+                       (delete-file ,tmp-file)
+                       (list nil nil)
+                       )
+                    command
+                    (number-to-string (line-number-at-pos))
+                    (number-to-string (racer--current-column))
+                    (buffer-file-name (buffer-base-buffer))
+                    :reply-func
+                    (lambda (data)
+                      (setq racer--prev-state (cadr data))
+                      (setq racer--capf-res (car data)))
+                    :error-handler
+                    (lambda (err) (message "ERR: %s" err))
+                    :unique)
+    (s-lines (s-trim-right (or racer--capf-res "")))))
 
 (defun racer--read-rust-string (string)
   "Convert STRING, a rust string literal, to an elisp string."
@@ -681,7 +711,7 @@ Commands:
 (defun racer-complete (&optional _ignore)
   "Completion candidates at point."
   (push `(,(incf racer--command-id) . completion-at-point) racer--command-queued)
-  (->> (racer--call-at-point "complete")
+  (->> (racer--call-at-point-async "complete")
        (--filter (s-starts-with? "MATCH" it))
        (--map (-let [(name line col file matchtype ctx)
                      (s-split-up-to "," (s-chop-prefix "MATCH " it) 5)]
@@ -817,6 +847,13 @@ If PATH is not in DIRECTORY, just abbreviate it."
         ;; Syntax highlight function signatures.
         (racer--syntax-highlight prototype)))))
 
+(defun racer--thread-init ()
+  "Init child thread."
+  (if racer--thread (timp-force-quit racer--thread))
+  (setq racer--thread (timp-get :persist t))
+  (timp-send-variable racer--thread racer-rust-src-path racer-cmd)
+  (timp-require-package racer--thread 'racer))
+
 (defvar racer-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "M-.") #'racer-find-definition)
@@ -830,7 +867,8 @@ If PATH is not in DIRECTORY, just abbreviate it."
   :keymap racer-mode-map
   (setq-local eldoc-documentation-function #'racer-eldoc)
   (set (make-local-variable 'completion-at-point-functions) nil)
-  (add-hook 'completion-at-point-functions #'racer-complete-at-point))
+  (add-hook 'completion-at-point-functions #'racer-complete-at-point)
+  (racer--thread-init))
 
 (define-obsolete-function-alias 'racer-turn-on-eldoc 'eldoc-mode)
 (define-obsolete-function-alias 'racer-activate 'racer-mode)
