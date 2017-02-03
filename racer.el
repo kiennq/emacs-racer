@@ -185,6 +185,18 @@ racer or racer.el."
     (switch-to-buffer buf)
     (goto-char (point-min))))
 
+(defun racer--print-debug (format-string &rest args)
+  "Print FORMAT-STRING with ARGS as debug information to *racer-debug-2*."
+  (let ((buf (get-buffer-create "*racer-debug-2*"))
+        (inhibit-read-only t))
+    (with-current-buffer buf
+      (setq buffer-read-only t)
+      (goto-char (point-max))
+      (insert (apply #'format format-string args))
+      (newline)
+      )))
+
+
 (defun racer--call (command &rest args)
   "Call racer command COMMAND with args ARGS.
 Return stdout if COMMAND exits normally, otherwise show an
@@ -296,11 +308,11 @@ Return a list of all the lines returned by the command."
                       tmp-file
                       :reply-func
                       (lambda (data)
-                        (message "res: %s" (length (s-lines (s-trim-right (car data)))))
+                        (racer--print-debug "res: %s" (length (s-lines (s-trim-right (car data)))))
                         (setq racer--prev-state (cadr data))
                         (setq racer--capf-res (car data)))
                       :error-handler
-                      (lambda (err) (message "ERR: %s" err))
+                      (lambda (err) (racer--print-debug "ERR: %s" err))
                       :unique)))
   (s-lines (s-trim-right (or racer--capf-res "")))
   )
