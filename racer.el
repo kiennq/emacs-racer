@@ -308,12 +308,12 @@ Return a list of all the lines returned by the command."
                       tmp-file
                       :reply-func
                       (lambda (data)
-                        (racer--print-debug "res: %s" (length (s-lines (s-trim-right (car data)))))
+                        ;; (racer--print-debug "res: %s" (length (s-lines (s-trim-right (car data)))))
                         (setq racer--prev-state (cadr data))
                         (setq racer--capf-res (car data)))
-                      :error-handler
-                      (lambda (err) (racer--print-debug "ERR: %s" err))
-                      :unique)))
+                      ;; :error-handler
+                      ;; (lambda (err) (racer--print-debug "ERR: %s" err))
+                      )))
   (s-lines (s-trim-right (or racer--capf-res "")))
   )
 
