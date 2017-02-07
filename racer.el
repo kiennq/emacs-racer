@@ -69,6 +69,7 @@
 (require 'button)
 (require 'help-mode)
 (require 'timp)
+(require 'cl-lib)
 
 (defgroup racer nil
   "Code completion, goto-definition and docs browsing for Rust via racer."
@@ -106,10 +107,46 @@ If $RUST_SRC_PATH is not set, look for rust source in rustup's install directory
   (or
    (getenv "CARGO_HOME")
    "~/.cargo")
-  "Path to your current cargo home. Usually `~/.cargo'.
+  "Path to your current cargo home.  Usually `~/.cargo'.
 If nil, we will query $CARGO_HOME at runtime."
   :type 'file
   :group 'racer)
+
+(defcustom racer-wsl-interop-p t
+  "Enable wsl interop ot not."
+  :type 'boolean
+  :group 'racer)
+
+(defsubst racer--wsl-interop-p ()
+  "Check if wsl-interop possible."
+  (and racer-wsl-interop-p (string= "windows-nt" system-type)))
+
+(defun convert-to-wsl-path (path)
+  "PATH."
+  (if (racer--wsl-interop-p)
+      (cl-letf* ((split-path (s-split "[\\/]" (file-truename path)))
+              ((car split-path) (s-replace ":" "" (car split-path))))
+        (s-join "/" (append '(nil "mnt") split-path)))
+    (file-truename path)))
+
+(defun convert-to-window-path (path)
+  "PATH."
+  (if (racer--wsl-interop-p)
+      (or (let ((split-path (s-split "[\\/]" path)))
+            (when (string= (nth 1 split-path) "mnt")
+              (cl-letf (((nth 2 split-path) (concat (nth 2 split-path) ":")))
+                (s-join "/" (nthcdr 2 split-path)))))
+          path)
+    (file-truename path)))
+
+(defun racer--oneline-command (program &rest args)
+  "Create one line command (in linux) from PROGRAM and ARGS."
+  (let ((rust-src-path
+         (--first (s-prefix? "RUST_SRC_PATH=" it) process-environment))
+        (cargo-home
+         (--first (s-prefix? "CARGO_HOME=" it) process-environment)))
+    (format "%s %s %s %s" cargo-home rust-src-path program
+            (s-join " " args))))
 
 (defun racer--cargo-project-root ()
   "Find the root of the current Cargo project."
@@ -199,7 +236,6 @@ racer or racer.el."
           (set-window-point (get-buffer-window) (point-max))))
       )))
 
-
 (defun racer--call (command &rest args)
   "Call racer command COMMAND with args ARGS.
 Return stdout if COMMAND exits normally, otherwise show an
@@ -210,8 +246,8 @@ error."
       (user-error "You need to set `racer-rust-src-path' or `RUST_SRC_PATH'"))
     (let ((default-directory (or (racer--cargo-project-root) default-directory))
           (process-environment (append (list
-                                        (format "RUST_SRC_PATH=%s" (expand-file-name rust-src-path))
-                                        (format "CARGO_HOME=%s" (expand-file-name cargo-home)))
+                                        (format "RUST_SRC_PATH=%s" (convert-to-wsl-path rust-src-path))
+                                        (format "CARGO_HOME=%s" (convert-to-wsl-path cargo-home)))
                                        process-environment)))
       (-let [(exit-code stdout _stderr)
              ;; (if (or (string= command "complete") (string= command "complete-with-snippet"))
@@ -252,9 +288,14 @@ Return a list (exit-code stdout stderr)."
       ;; into.
       (with-temp-buffer
         (setq exit-code
-              (apply #'call-process program nil
-                     (list (current-buffer) tmp-file-for-stderr)
-                     nil args))
+              (if (racer--wsl-interop-p)
+                  (apply #'call-process "bash" nil
+                         (list (current-buffer) tmp-file-for-stderr)
+                         nil "-c" (list (apply #'racer--oneline-command program args)))
+                (apply #'call-process program nil
+                       (list (current-buffer) tmp-file-for-stderr)
+                       nil args)
+                ))
         (setq stdout (buffer-string)))
       (setq stderr (racer--slurp tmp-file-for-stderr))
       (setq racer--prev-state
@@ -278,8 +319,8 @@ Return a list of all the lines returned by the command."
       (racer--call command
                    (number-to-string (line-number-at-pos))
                    (number-to-string (racer--current-column))
-                   (buffer-file-name (buffer-base-buffer))
-                   tmp-file)))))
+                   (convert-to-wsl-path (buffer-file-name (buffer-base-buffer)))
+                   (convert-to-wsl-path tmp-file))))))
 
 (defvar racer--capf-res nil)
 (defvar racer--capf-last-cmd nil)
@@ -299,16 +340,17 @@ Return a list of all the lines returned by the command."
                                              (goto-char (point-min))
                                              (forward-line 20)
                                              (buffer-substring (point-min) (line-end-position)))))
-                            (delete-file tmp-file)
-                            (list trim-res racer--prev-state))
+                            (delete-file (convert-to-window-path tmp-file))
+                            (list trim-res racer--prev-state)
+                            )
                           ;; (delete-file ,tmp-file)
                           ;; (list nil nil)
                           )
                       command
                       (number-to-string (line-number-at-pos))
                       (number-to-string (racer--current-column))
-                      (buffer-file-name (buffer-base-buffer))
-                      tmp-file
+                      (convert-to-wsl-path (buffer-file-name (buffer-base-buffer)))
+                      (convert-to-wsl-path tmp-file)
                       :reply-func
                       (lambda (data)
                         ;; (racer--print-debug "res: %s" (length (s-lines (s-trim-right (car data)))))
@@ -738,7 +780,7 @@ Commands:
             (xref-push-marker-stack)
           (with-no-warnings
             (ring-insert find-tag-marker-ring (point-marker))))
-        (racer--find-file file (string-to-number line) (string-to-number col)))
+        (racer--find-file (convert-to-window-path file) (string-to-number line) (string-to-number col)))
     (error "No definition found")))
 
 (defun racer--syntax-highlight (str)
