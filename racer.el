@@ -194,6 +194,9 @@ racer or racer.el."
       (goto-char (point-max))
       (insert (apply #'format format-string args))
       (newline)
+      (let ((win (get-buffer-window)))
+        (when win
+          (set-window-point (get-buffer-window) (point-max))))
       )))
 
 
@@ -311,8 +314,8 @@ Return a list of all the lines returned by the command."
                         ;; (racer--print-debug "res: %s" (length (s-lines (s-trim-right (car data)))))
                         (setq racer--prev-state (cadr data))
                         (setq racer--capf-res (car data)))
-                      ;; :error-handler
-                      ;; (lambda (err) (racer--print-debug "ERR: %s" err))
+                      :error-handler
+                      (lambda (err) (message "ERR: %s" err))
                       )))
   (s-lines (s-trim-right (or racer--capf-res "")))
   )
