@@ -322,8 +322,13 @@ Return a list of all the lines returned by the command."
                    (convert-to-wsl-path (buffer-file-name (buffer-base-buffer)))
                    (convert-to-wsl-path tmp-file))))))
 
+
+(defvar racer-capf-callback nil
+  "Callback function to call when capf candidates is ready.")
+
 (defvar racer--capf-res nil)
 (defvar racer--capf-last-cmd nil)
+(defvar racer--capf-query-id 0)
 
 (defun racer--call-at-point-async (command)
   "Asynchronously call racer command COMMAND at point of current buffer.
@@ -333,7 +338,7 @@ Return a list of all the lines returned by the command."
     (let ((tmp-file (make-temp-file "racer")))
       (write-region nil nil tmp-file nil 'silent)
       (timp-send-exec racer--thread
-                      #'(lambda (command row col cur-file tmp-file)
+                      #'(lambda (command row col cur-file tmp-file id)
                           (let* ((res (racer--call command row col cur-file tmp-file))
                                  (trim-res (with-temp-buffer
                                              (insert res)
@@ -341,21 +346,35 @@ Return a list of all the lines returned by the command."
                                              (forward-line 20)
                                              (buffer-substring (point-min) (line-end-position)))))
                             (delete-file (convert-to-window-path tmp-file))
-                            (list trim-res racer--prev-state)
+                            (list id trim-res racer--prev-state)
                             )
-                          ;; (delete-file ,tmp-file)
-                          ;; (list nil nil)
                           )
                       command
                       (number-to-string (line-number-at-pos))
                       (number-to-string (racer--current-column))
                       (convert-to-wsl-path (buffer-file-name (buffer-base-buffer)))
                       (convert-to-wsl-path tmp-file)
+                      (incf racer--capf-query-id)
                       :reply-func
                       (lambda (data)
                         ;; (racer--print-debug "res: %s" (length (s-lines (s-trim-right (car data)))))
-                        (setq racer--prev-state (cadr data))
-                        (setq racer--capf-res (car data)))
+                        (-let* (((id res state) data)
+                                (res-list (s-lines (s-trim-right res))))
+                          (setq racer--prev-state state)
+                          (setq racer--capf-res res)
+                          (if (and (functionp racer-capf-callback)
+                                   (or (= id racer--capf-query-id) (< (length res-list) 20)))
+                              (funcall racer-capf-callback
+                                       (->> res-list
+                                            (--filter (s-starts-with? "MATCH" it))
+                                            (--map (-let [(name line col file matchtype ctx)
+                                                          (s-split-up-to "," (s-chop-prefix "MATCH " it) 5)]
+                                                     (put-text-property 0 1 'line (string-to-number line) name)
+                                                     (put-text-property 0 1 'col (string-to-number col) name)
+                                                     (put-text-property 0 1 'file file name)
+                                                     (put-text-property 0 1 'matchtype matchtype name)
+                                                     (put-text-property 0 1 'ctx ctx name)
+                                                     name)))))))
                       :error-handler
                       (lambda (err) (message "ERR: %s" err))
                       )))
@@ -708,18 +727,22 @@ Commands:
         (parent (f-filename (f-parent path))))
     (f-join parent file)))
 
-(defun racer-complete (&optional _ignore)
+(defun racer-complete (&optional pref ret-val-require)
   "Completion candidates at point."
-  (->> (racer--call-at-point-async "complete")
-       (--filter (s-starts-with? "MATCH" it))
-       (--map (-let [(name line col file matchtype ctx)
-                     (s-split-up-to "," (s-chop-prefix "MATCH " it) 5)]
-                (put-text-property 0 1 'line (string-to-number line) name)
-                (put-text-property 0 1 'col (string-to-number col) name)
-                (put-text-property 0 1 'file file name)
-                (put-text-property 0 1 'matchtype matchtype name)
-                (put-text-property 0 1 'ctx ctx name)
-                name))))
+  (let ((raw-candidates (racer--call-at-point-async "complete")))
+    (if (or ret-val-require (not (functionp racer-capf-callback)))
+        (->> raw-candidates
+             (--filter (s-starts-with? "MATCH" it))
+             (--map (-let [(name line col file matchtype ctx)
+                           (s-split-up-to "," (s-chop-prefix "MATCH " it) 5)]
+                      (put-text-property 0 1 'line (string-to-number line) name)
+                      (put-text-property 0 1 'col (string-to-number col) name)
+                      (put-text-property 0 1 'file file name)
+                      (put-text-property 0 1 'matchtype matchtype name)
+                      (put-text-property 0 1 'ctx ctx name)
+                      name)))
+      (list (propertize (concat pref "x") 'wait-result t))
+      )))
 
 (defun racer--trim-up-to (needle s)
   "Return content after the occurrence of NEEDLE in S."
@@ -836,7 +859,7 @@ If PATH is not in DIRECTORY, just abbreviate it."
     (racer--goto-func-name)
     ;; If there's a variable at point:
     (-when-let* ((rust-sym (symbol-at-point))
-                 (comp-possibilities (racer-complete))
+                 (comp-possibilities (racer-complete t t))
                  (matching-possibility
                   (--find (string= it (symbol-name rust-sym)) comp-possibilities))
                  (prototype (get-text-property 0 'ctx matching-possibility))
