@@ -244,6 +244,9 @@ error."
         (cargo-home (or racer-cargo-home (getenv "CARGO_HOME"))))
     (when (null rust-src-path)
       (user-error "You need to set `racer-rust-src-path' or `RUST_SRC_PATH'"))
+    (unless (file-exists-p rust-src-path)
+      (user-error "No such directory: %s. Please set `racer-rust-src-path' or `RUST_SRC_PATH'"
+                  rust-src-path))
     (let ((default-directory (or (racer--cargo-project-root) default-directory))
           (process-environment (append (list
                                         (format "RUST_SRC_PATH=%s" (convert-to-wsl-path rust-src-path))
@@ -254,7 +257,9 @@ error."
              ;;     (racer--shell-command-async racer-cmd (cons command args))
              ;;   (racer--shell-command racer-cmd (cons command args)))
              (racer--shell-command racer-cmd (cons command args))]
-        (unless (zerop exit-code)
+        ;; Use `equal' instead of `zero' as exit-code can be a string
+        ;; "Aborted" if racer crashes.
+        (unless (equal 0 exit-code)
           (user-error "%s exited with %s. `M-x racer-debug' for more info"
                       racer-cmd exit-code))
         stdout))))
