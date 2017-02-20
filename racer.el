@@ -735,7 +735,9 @@ Commands:
 (defun racer-complete (&optional pref ret-val-require)
   "Completion candidates at point."
   (let ((raw-candidates (racer--call-at-point-async "complete")))
-    (if (or ret-val-require (not (functionp racer-capf-callback)))
+    (if (or ret-val-require
+            (not (functionp racer-capf-callback))
+            (< (length raw-candidates) 18))
         (->> raw-candidates
              (--filter (s-starts-with? "MATCH" it))
              (--map (-let [(name line col file matchtype ctx)
